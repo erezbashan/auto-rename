@@ -6,7 +6,7 @@ Automatically renames scanned documents and images dropped into `~/Downloads/ren
 
 1. Drop any `.pdf`, `.jpg`, `.jpeg`, `.png`, `.webp`, `.heic`, or `.txt` file into `~/Downloads/rename`.
 2. macOS `launchd` detects the change via `WatchPaths` and triggers `rename_scans.py`.
-3. `rename_scans.py` sends the file to Gemini (`gemini-flash-latest` by default) with your Gem's instructions:
+3. `rename_scans.py` sends the file to Gemini (`gemini-3.5-flash` with fallback to `gemini-3.5-flash-lite` and `gemini-3.1-flash-lite`) with your Gem's instructions:
    - Starts with `yyyy-mm-dd` extracted from the document (or literal `yyyy-mm-dd` if no date is found).
    - Concise description in the same language as the document.
    - Spaces separating words (no underscores, no quotes).

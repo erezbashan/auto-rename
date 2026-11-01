@@ -22,7 +22,7 @@ import urllib.request
 from pathlib import Path
 
 PROJECT_DIR = Path("/Users/erezbashan/workspace/renaming-scans")
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 WATCH_DIR = Path("/tmp/rename-scans-inbox")
 DEST_DIR = Path.home() / "Downloads"
 FAILED_DIR = DEST_DIR / "rename_failed"
@@ -30,6 +30,7 @@ LOGS_DIR = PROJECT_DIR / "logs"
 LOG_FILE = LOGS_DIR / "renamer.log"
 LOCK_FILE = Path("/tmp/rename-scans.lock")
 ENV_FILE = PROJECT_DIR / ".env"
+DEFAULT_MODELS = ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
 
 SUPPORTED_EXTENSIONS = {
     ".pdf": "application/pdf",
@@ -151,7 +152,7 @@ def upload_to_gemini_files_api(filepath: Path, mime_type: str, api_key: str) -> 
     return result["file"]["uri"]
 
 
-def generate_new_filename(filepath: Path, api_key: str, model: str) -> str:
+def generate_new_filename(filepath: Path, api_key: str, models: list[str]) -> str:
     ext = filepath.suffix.lower()
     mime_type = SUPPORTED_EXTENSIONS.get(ext) or mimetypes.guess_type(filepath.name)[0] or "application/octet-stream"
 
@@ -182,7 +183,6 @@ def generate_new_filename(filepath: Path, api_key: str, model: str) -> str:
         ],
         "generationConfig": {
             "temperature": 0.1,
-            "thinkingConfig": {"thinkingBudget": 0},
             "responseMimeType": "application/json",
             "responseSchema": {
                 "type": "OBJECT",
@@ -197,20 +197,28 @@ def generate_new_filename(filepath: Path, api_key: str, model: str) -> str:
         },
     }
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+    encoded_payload = json.dumps(payload).encode("utf-8")
+    last_err: Exception | None = None
+    for model in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+        req = urllib.request.Request(
+            url,
+            data=encoded_payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+            text = body["candidates"][0]["content"]["parts"][0]["text"]
+            parsed = json.loads(text)
+            return parsed["new_filename"]
+        except Exception as e:
+            logging.warning("Model %s failed for %s (%s), trying next fallback...", model, filepath.name, e)
+            last_err = e
 
-    with urllib.request.urlopen(req, timeout=90) as resp:
-        body = json.loads(resp.read().decode("utf-8"))
-
-    text = body["candidates"][0]["content"]["parts"][0]["text"]
-    parsed = json.loads(text)
-    return parsed["new_filename"]
+    assert last_err is not None
+    raise last_err
 
 
 def sanitize_filename(raw_name: str, original_suffix: str) -> str:
@@ -257,14 +265,14 @@ def unique_destination_path(dest_dir: Path, filename: str) -> Path:
         counter += 1
 
 
-def process_file(filepath: Path, api_key: str, model: str) -> None:
+def process_file(filepath: Path, api_key: str, models: list[str]) -> None:
     if not wait_until_file_ready(filepath):
         logging.warning("File %s disappeared or is empty, skipping.", filepath.name)
         return
 
     logging.info("Processing file: %s", filepath.name)
     try:
-        raw_new_name = generate_new_filename(filepath, api_key, model)
+        raw_new_name = generate_new_filename(filepath, api_key, models)
         clean_name = sanitize_filename(raw_new_name, filepath.suffix)
         target_path = unique_destination_path(DEST_DIR, clean_name)
 
@@ -329,7 +337,8 @@ def main() -> int:
 
     env = load_env()
     api_key = os.environ.get("GEMINI_API_KEY") or env.get("GEMINI_API_KEY")
-    model = os.environ.get("GEMINI_MODEL") or env.get("GEMINI_MODEL") or "gemini-3.8-flash"
+    custom_model = os.environ.get("GEMINI_MODEL") or env.get("GEMINI_MODEL")
+    models = [custom_model] + [m for m in DEFAULT_MODELS if m != custom_model] if custom_model else list(DEFAULT_MODELS)
 
     if not api_key:
         logging.error("GEMINI_API_KEY not found in environment or %s", ENV_FILE)
@@ -351,7 +360,7 @@ def main() -> int:
         if not files:
             break
         for f in files:
-            process_file(f, api_key, model)
+            process_file(f, api_key, models)
 
     return 0
 
