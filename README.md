@@ -16,7 +16,8 @@ macOS Finder Quick Action (`Auto Rename`) that renames one or more selected docu
 ## Project Structure
 
 - `auto_rename.py`: Core script that accepts one or more file paths and renames them in-place.
-- `Auto Rename.workflow`: macOS Automator Quick Action bundle (installed into `~/Library/Services/Auto Rename.workflow`).
+- `Auto Rename.workflow`: macOS Automator Service / Quick Action bundle (installed into `~/Library/Services/Auto Rename.workflow`, available in both Finder and Marta).
+- `marta/auto_rename.lua`: Native Marta Lua plugin (installed into `~/Library/Application Support/org.yanex.marta/Plugins/auto_rename.lua`).
 - `.env`: Contains `GEMINI_API_KEY` (and optional `GEMINI_MODEL`).
 - `logs/renamer.log`: Execution and rename history log.
 

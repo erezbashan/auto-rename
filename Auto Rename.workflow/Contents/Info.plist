@@ -9,7 +9,7 @@
 	<key>CFBundleName</key>
 	<string>Auto Rename</string>
 	<key>CFBundleShortVersionString</key>
-	<string>2.2</string>
+	<string>2.3</string>
 	<key>NSServices</key>
 	<array>
 		<dict>
@@ -24,11 +24,6 @@
 			</dict>
 			<key>NSMessage</key>
 			<string>runWorkflowAsService</string>
-			<key>NSRequiredContext</key>
-			<dict>
-				<key>NSApplicationIdentifier</key>
-				<string>com.apple.finder</string>
-			</dict>
 			<key>NSSendFileTypes</key>
 			<array>
 				<string>public.item</string>
