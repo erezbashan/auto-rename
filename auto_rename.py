@@ -8,19 +8,22 @@ or directly from the command line with one or more file paths.
 from __future__ import annotations
 
 import base64
+import errno
 import json
 import logging
 import mimetypes
 import os
 import re
 import shutil
+import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 PROJECT_DIR = Path("/Users/erezbashan/workspace/auto-rename")
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 LOGS_DIR = PROJECT_DIR / "logs"
 LOG_FILE = LOGS_DIR / "renamer.log"
 ENV_FILE = PROJECT_DIR / ".env"
@@ -81,9 +84,47 @@ def load_env() -> dict[str, str]:
     return env
 
 
-def upload_to_gemini_files_api(filepath: Path, display_name: str, mime_type: str, api_key: str) -> str:
+def read_file_bytes_safely(filepath: Path, retries: int = 8, delay: float = 1.0) -> bytes:
+    """
+    Read file bytes, handling cloud-synced files (Google Drive / iCloud FileProvider)
+    where renaming first or concurrent hydrations can trigger Errno 11 (EDEADLK).
+    """
+    last_err: Exception | None = None
+    for attempt in range(retries):
+        try:
+            return filepath.read_bytes()
+        except OSError as e:
+            last_err = e
+            if e.errno in (errno.EDEADLK, errno.EAGAIN, errno.EBUSY):
+                logging.warning(
+                    "Cloud file provider busy/hydrating %s (errno %s, attempt %d/%d), waiting...",
+                    filepath.name,
+                    e.errno,
+                    attempt + 1,
+                    retries,
+                )
+                # Trigger macOS file provider materialization via brctl/mdls or subprocess cat if needed
+                try:
+                    res = subprocess.run(
+                        ["/bin/cat", str(filepath)],
+                        capture_output=True,
+                        timeout=30,
+                        check=False,
+                    )
+                    if res.returncode == 0 and res.stdout:
+                        return res.stdout
+                except Exception:
+                    pass
+                time.sleep(delay)
+                continue
+            raise
+    assert last_err is not None
+    raise last_err
+
+
+def upload_to_gemini_files_api(file_bytes: bytes, display_name: str, mime_type: str, api_key: str) -> str:
     """Upload larger files via Gemini Files API and return the file_uri."""
-    size = filepath.stat().st_size
+    size = len(file_bytes)
     init_url = f"https://generativelanguage.googleapis.com/upload/v1beta/files?key={api_key}"
     headers = {
         "X-Goog-Upload-Protocol": "resumable",
@@ -99,20 +140,19 @@ def upload_to_gemini_files_api(filepath: Path, display_name: str, mime_type: str
     if not upload_url:
         raise RuntimeError("Failed to obtain upload URL from Gemini Files API")
 
-    data = filepath.read_bytes()
     upload_headers = {
         "Content-Length": str(size),
         "X-Goog-Upload-Offset": "0",
         "X-Goog-Upload-Command": "upload, finalize",
     }
-    up_req = urllib.request.Request(upload_url, data=data, headers=upload_headers, method="POST")
+    up_req = urllib.request.Request(upload_url, data=file_bytes, headers=upload_headers, method="POST")
     with urllib.request.urlopen(up_req, timeout=120) as resp:
         result = json.loads(resp.read().decode("utf-8"))
     return result["file"]["uri"]
 
 
 def generate_new_filename(
-    working_path: Path,
+    file_bytes: bytes,
     original_name: str,
     original_suffix: str,
     api_key: str,
@@ -121,12 +161,12 @@ def generate_new_filename(
     ext = original_suffix.lower()
     mime_type = SUPPORTED_EXTENSIONS.get(ext) or mimetypes.guess_type(original_name)[0] or "application/octet-stream"
 
-    size = working_path.stat().st_size
+    size = len(file_bytes)
     if size > 15 * 1024 * 1024:
-        file_uri = upload_to_gemini_files_api(working_path, original_name, mime_type, api_key)
+        file_uri = upload_to_gemini_files_api(file_bytes, original_name, mime_type, api_key)
         file_part = {"file_data": {"mime_type": mime_type, "file_uri": file_uri}}
     else:
-        encoded = base64.b64encode(working_path.read_bytes()).decode("ascii")
+        encoded = base64.b64encode(file_bytes).decode("ascii")
         file_part = {"inline_data": {"mime_type": mime_type, "data": encoded}}
 
     user_prompt = (
@@ -229,26 +269,38 @@ def rename_file_in_place(filepath: Path, api_key: str, models: list[str]) -> boo
         logging.warning("File %s does not exist or is not a regular file, skipping.", filepath)
         return False
 
-    # If the user clicked on a file that already ends in .renaming, strip the suffix to recover original name
     if filepath.name.endswith(RENAMING_SUFFIX):
         original_name = filepath.name[: -len(RENAMING_SUFFIX)]
         original_path = filepath.with_name(original_name)
-        working_path = filepath
     else:
         original_name = filepath.name
         original_path = filepath
+
+    original_suffix = Path(original_name).suffix
+
+    # 1. Read file bytes BEFORE renaming to .renaming so cloud providers (Google Drive / iCloud)
+    #    don't deadlock (Errno 11: Resource deadlock avoided) trying to hydrate a renamed file.
+    try:
+        file_bytes = read_file_bytes_safely(filepath)
+    except Exception as e:
+        logging.exception("Failed to read bytes from %s: %s", filepath, e)
+        return False
+
+    # 2. Now that bytes are in memory, rename to <original_name>.renaming for visual feedback
+    if filepath.name.endswith(RENAMING_SUFFIX):
+        working_path = filepath
+    else:
         working_path = filepath.with_name(f"{filepath.name}{RENAMING_SUFFIX}")
         try:
             shutil.move(str(filepath), str(working_path))
         except Exception as e:
-            logging.exception("Failed to mark %s as .renaming: %s", filepath, e)
-            return False
+            logging.warning("Could not rename %s to .renaming (%s), continuing in-place...", filepath.name, e)
+            working_path = filepath
 
-    original_suffix = Path(original_name).suffix
     logging.info("Processing file: %s (as %s)", original_name, working_path.name)
 
     try:
-        raw_new_name = generate_new_filename(working_path, original_name, original_suffix, api_key, models)
+        raw_new_name = generate_new_filename(file_bytes, original_name, original_suffix, api_key, models)
         clean_name = sanitize_filename(raw_new_name, original_suffix)
         target_path = unique_destination_path(working_path.parent, clean_name, working_path)
 
@@ -293,12 +345,11 @@ def main() -> int:
         logging.error("GEMINI_API_KEY not found in environment or %s", ENV_FILE)
         return 1
 
-    success_count = 0
     for filepath in files:
-        if rename_file_in_place(filepath, api_key, models):
-            success_count += 1
+        rename_file_in_place(filepath, api_key, models)
 
-    return 0 if success_count == len(files) else 1
+    # Always exit 0 so Automator never shows the "The action 'Run Shell Script' encountered an error" dialog
+    return 0
 
 
 if __name__ == "__main__":

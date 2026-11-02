@@ -59,7 +59,7 @@
 				<key>ActionParameters</key>
 				<dict>
 					<key>COMMAND_STRING</key>
-					<string>/opt/homebrew/bin/python3 /Users/erezbashan/workspace/auto-rename/auto_rename.py "$@"</string>
+					<string>/opt/homebrew/bin/python3 /Users/erezbashan/workspace/auto-rename/auto_rename.py "$@" || true</string>
 					<key>CheckedForUserDefaultShell</key>
 					<true/>
 					<key>inputMethod</key>
