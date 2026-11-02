@@ -7,6 +7,8 @@ plugin {
 action {
     id = "run",
     name = "Auto Rename",
+    menuName = "Auto Rename",
+    shortName = "Auto Rename",
     isApplicable = function(context)
         return context.activePane.model.hasActiveFiles
     end,
@@ -26,5 +28,18 @@ action {
         if #args > 1 then
             martax.execute("/opt/homebrew/bin/python3", args)
         end
+    end
+}
+
+local registerContextMenu = contextMenuItemProvider or (marta and marta.contextMenuItemProvider)
+registerContextMenu {
+    id = "menu",
+    forFiles = function(context)
+        return {
+            {
+                actionId = "com.erezbashan.autorename.run",
+                category = "mutators"
+            }
+        }
     end
 }

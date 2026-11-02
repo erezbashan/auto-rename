@@ -23,7 +23,7 @@ import urllib.request
 from pathlib import Path
 
 PROJECT_DIR = Path("/Users/erezbashan/workspace/auto-rename")
-VERSION = "2.3.0"
+VERSION = "2.4.0"
 LOGS_DIR = PROJECT_DIR / "logs"
 LOG_FILE = LOGS_DIR / "renamer.log"
 ENV_FILE = PROJECT_DIR / ".env"
