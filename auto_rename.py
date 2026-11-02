@@ -14,18 +14,18 @@ import mimetypes
 import os
 import re
 import shutil
-import subprocess
 import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 PROJECT_DIR = Path("/Users/erezbashan/workspace/auto-rename")
-VERSION = "2.0.1"
+VERSION = "2.1.0"
 LOGS_DIR = PROJECT_DIR / "logs"
 LOG_FILE = LOGS_DIR / "renamer.log"
 ENV_FILE = PROJECT_DIR / ".env"
 DEFAULT_MODELS = ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
+RENAMING_SUFFIX = ".renaming"
 
 SUPPORTED_EXTENSIONS = {
     ".pdf": "application/pdf",
@@ -65,7 +65,6 @@ def setup_logging() -> None:
         format=f"%(asctime)s [v{VERSION}] [%(levelname)s] %(message)s",
         handlers=[
             logging.FileHandler(LOG_FILE, encoding="utf-8"),
-            logging.StreamHandler(sys.stdout),
         ],
     )
 
@@ -82,24 +81,7 @@ def load_env() -> dict[str, str]:
     return env
 
 
-def notify(title: str, message: str) -> None:
-    try:
-        escaped_msg = message.replace("\\", "\\\\").replace('"', '\\"')
-        escaped_title = title.replace("\\", "\\\\").replace('"', '\\"')
-        subprocess.run(
-            [
-                "osascript",
-                "-e",
-                f'display notification "{escaped_msg}" with title "{escaped_title}"',
-            ],
-            check=False,
-            timeout=5,
-        )
-    except Exception:
-        pass
-
-
-def upload_to_gemini_files_api(filepath: Path, mime_type: str, api_key: str) -> str:
+def upload_to_gemini_files_api(filepath: Path, display_name: str, mime_type: str, api_key: str) -> str:
     """Upload larger files via Gemini Files API and return the file_uri."""
     size = filepath.stat().st_size
     init_url = f"https://generativelanguage.googleapis.com/upload/v1beta/files?key={api_key}"
@@ -110,7 +92,7 @@ def upload_to_gemini_files_api(filepath: Path, mime_type: str, api_key: str) -> 
         "X-Goog-Upload-Header-Content-Type": mime_type,
         "Content-Type": "application/json",
     }
-    meta = json.dumps({"file": {"display_name": filepath.name}}).encode("utf-8")
+    meta = json.dumps({"file": {"display_name": display_name}}).encode("utf-8")
     req = urllib.request.Request(init_url, data=meta, headers=headers, method="POST")
     with urllib.request.urlopen(req, timeout=30) as resp:
         upload_url = resp.headers.get("X-Goog-Upload-URL")
@@ -129,21 +111,27 @@ def upload_to_gemini_files_api(filepath: Path, mime_type: str, api_key: str) -> 
     return result["file"]["uri"]
 
 
-def generate_new_filename(filepath: Path, api_key: str, models: list[str]) -> str:
-    ext = filepath.suffix.lower()
-    mime_type = SUPPORTED_EXTENSIONS.get(ext) or mimetypes.guess_type(filepath.name)[0] or "application/octet-stream"
+def generate_new_filename(
+    working_path: Path,
+    original_name: str,
+    original_suffix: str,
+    api_key: str,
+    models: list[str],
+) -> str:
+    ext = original_suffix.lower()
+    mime_type = SUPPORTED_EXTENSIONS.get(ext) or mimetypes.guess_type(original_name)[0] or "application/octet-stream"
 
-    size = filepath.stat().st_size
+    size = working_path.stat().st_size
     if size > 15 * 1024 * 1024:
-        file_uri = upload_to_gemini_files_api(filepath, mime_type, api_key)
+        file_uri = upload_to_gemini_files_api(working_path, original_name, mime_type, api_key)
         file_part = {"file_data": {"mime_type": mime_type, "file_uri": file_uri}}
     else:
-        encoded = base64.b64encode(filepath.read_bytes()).decode("ascii")
+        encoded = base64.b64encode(working_path.read_bytes()).decode("ascii")
         file_part = {"inline_data": {"mime_type": mime_type, "data": encoded}}
 
     user_prompt = (
-        f"Original filename: {filepath.name}\n"
-        f"Original extension: {filepath.suffix}\n"
+        f"Original filename: {original_name}\n"
+        f"Original extension: {original_suffix}\n"
         "Generate the new filename strictly following the system instructions."
     )
 
@@ -191,7 +179,7 @@ def generate_new_filename(filepath: Path, api_key: str, models: list[str]) -> st
             parsed = json.loads(text)
             return parsed["new_filename"]
         except Exception as e:
-            logging.warning("Model %s failed for %s (%s), trying next fallback...", model, filepath.name, e)
+            logging.warning("Model %s failed for %s (%s), trying next fallback...", model, original_name, e)
             last_err = e
 
     assert last_err is not None
@@ -241,26 +229,51 @@ def rename_file_in_place(filepath: Path, api_key: str, models: list[str]) -> boo
         logging.warning("File %s does not exist or is not a regular file, skipping.", filepath)
         return False
 
-    logging.info("Processing file: %s", filepath)
-    try:
-        raw_new_name = generate_new_filename(filepath, api_key, models)
-        clean_name = sanitize_filename(raw_new_name, filepath.suffix)
-        target_path = unique_destination_path(filepath.parent, clean_name, filepath)
+    # If the user clicked on a file that already ends in .renaming, strip the suffix to recover original name
+    if filepath.name.endswith(RENAMING_SUFFIX):
+        original_name = filepath.name[: -len(RENAMING_SUFFIX)]
+        original_path = filepath.with_name(original_name)
+        working_path = filepath
+    else:
+        original_name = filepath.name
+        original_path = filepath
+        working_path = filepath.with_name(f"{filepath.name}{RENAMING_SUFFIX}")
+        try:
+            shutil.move(str(filepath), str(working_path))
+        except Exception as e:
+            logging.exception("Failed to mark %s as .renaming: %s", filepath, e)
+            return False
 
-        if target_path.resolve() != filepath.resolve():
-            shutil.move(str(filepath), str(target_path))
-        logging.info("Renamed: '%s' -> '%s'", filepath.name, target_path.name)
-        notify(f"Auto Rename (v{VERSION})", f"{filepath.name} → {target_path.name}")
+    original_suffix = Path(original_name).suffix
+    logging.info("Processing file: %s (as %s)", original_name, working_path.name)
+
+    try:
+        raw_new_name = generate_new_filename(working_path, original_name, original_suffix, api_key, models)
+        clean_name = sanitize_filename(raw_new_name, original_suffix)
+        target_path = unique_destination_path(working_path.parent, clean_name, working_path)
+
+        shutil.move(str(working_path), str(target_path))
+        logging.info("Renamed: '%s' -> '%s'", original_name, target_path.name)
         return True
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="replace")
-        logging.error("Gemini API HTTP error for %s: %s - %s", filepath.name, e.code, err_body)
-        notify(f"Auto Rename Failed (v{VERSION})", f"API error on {filepath.name}")
+        logging.error("Gemini API HTTP error for %s: %s - %s", original_name, e.code, err_body)
+        restore_original(working_path, original_path)
         return False
     except Exception as e:
-        logging.exception("Failed to process %s: %s", filepath.name, e)
-        notify(f"Auto Rename Failed (v{VERSION})", f"Error on {filepath.name}: {e}")
+        logging.exception("Failed to process %s: %s", original_name, e)
+        restore_original(working_path, original_path)
         return False
+
+
+def restore_original(working_path: Path, original_path: Path) -> None:
+    try:
+        if working_path.exists() and working_path != original_path:
+            target = unique_destination_path(original_path.parent, original_path.name, working_path)
+            shutil.move(str(working_path), str(target))
+            logging.info("Restored original filename: %s", target.name)
+    except Exception as restore_err:
+        logging.error("Failed to restore %s to %s: %s", working_path, original_path, restore_err)
 
 
 def main() -> int:
@@ -278,7 +291,6 @@ def main() -> int:
 
     if not api_key:
         logging.error("GEMINI_API_KEY not found in environment or %s", ENV_FILE)
-        notify(f"Auto Rename Failed (v{VERSION})", "Missing GEMINI_API_KEY in .env")
         return 1
 
     success_count = 0

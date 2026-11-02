@@ -76,7 +76,7 @@
 				<key>CanShowSelectedItemsWhenRun</key>
 				<false/>
 				<key>CanShowWhenRun</key>
-				<true/>
+				<false/>
 				<key>Category</key>
 				<array>
 					<string>AMCategoryUtilities</string>
