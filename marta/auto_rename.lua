@@ -10,7 +10,7 @@ action {
     menuName = "Auto Rename",
     shortName = "Auto Rename",
     isApplicable = function(context)
-        return context.activePane.model.hasActiveFiles
+        return context.activePane ~= nil and context.activePane.model.hasActiveFiles
     end,
     apply = function(context)
         local activeFiles = context.activePane.model.activeFiles
@@ -19,9 +19,17 @@ action {
         end
 
         local args = { "/Users/erezbashan/workspace/auto-rename/auto_rename.py" }
-        for _, fileInfo in ipairs(activeFiles) do
-            if fileInfo.path then
-                table.insert(args, fileInfo.path)
+        for _, file in ipairs(activeFiles) do
+            local filePath = nil
+            if type(file.path) == "string" then
+                filePath = file.path
+            elseif file.path and file.path.rawValue then
+                filePath = file.path.rawValue
+            elseif file.rawPath then
+                filePath = file.rawPath
+            end
+            if filePath then
+                table.insert(args, filePath)
             end
         end
 

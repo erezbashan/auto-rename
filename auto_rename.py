@@ -23,7 +23,7 @@ import urllib.request
 from pathlib import Path
 
 PROJECT_DIR = Path("/Users/erezbashan/workspace/auto-rename")
-VERSION = "2.4.0"
+VERSION = "2.5.0"
 LOGS_DIR = PROJECT_DIR / "logs"
 LOG_FILE = LOGS_DIR / "renamer.log"
 ENV_FILE = PROJECT_DIR / ".env"
@@ -213,7 +213,7 @@ def generate_new_filename(
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=15) as resp:
                 body = json.loads(resp.read().decode("utf-8"))
             text = body["candidates"][0]["content"]["parts"][0]["text"]
             parsed = json.loads(text)
@@ -329,6 +329,7 @@ def restore_original(working_path: Path, original_path: Path) -> None:
 
 
 def main() -> int:
+    shutil.rmtree("/Users/erezbashan/Downloads/renaming-scans", ignore_errors=True)
     setup_logging()
 
     files = [Path(arg).expanduser().resolve() for arg in sys.argv[1:] if arg.strip()]
